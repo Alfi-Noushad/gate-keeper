@@ -1,0 +1,38 @@
+services:
+  # 1. In-Memory State Store
+  redis:
+    image: redis:alpine
+    container_name: gatekeeper-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # 2. Mock Users Microservice
+  users-service:
+    image: kennethreitz/httpbin
+    container_name: service-users
+
+  # 3. Mock Orders Microservice
+  orders-service:
+    image: kennethreitz/httpbin
+    container_name: service-orders
+
+  # 4. GateKeeper API Gateway
+  gateway:
+    build: .
+    container_name: gatekeeper-gateway
+    ports:
+      - "8080:8080"
+    depends_on:
+      redis:
+        condition: service_healthy
+      users-service:
+        condition: service_started
+      orders-service:
+        condition: service_started
+    environment:
+      - REDIS_ADDR=redis:6379
