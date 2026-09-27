@@ -6,6 +6,7 @@ import (
     "net/http"
     "net/http/httputil"
     "net/url"
+    "os"
     "strconv"
     "time"
     "context"
@@ -83,19 +84,26 @@ func (r *Router) Match(path string) *httputil.ReverseProxy {
     return nil
 }
 
+func getEnv(key, fallback string) string {
+    if value, exists := os.LookupEnv(key); exists {
+        return value
+    }
+    return fallback
+}
 
 
 func main() {
 
+    redisAddr := getEnv("REDIS_ADDR", "localhost:6379")
     // connect to redis
     rdb := redis.NewClient(&redis.Options{
-        Addr: "localhost:6379",
+        Addr: redisAddr,
     })
 
-    if err := rdb.Ping(ctx).Err(); err != nil {
-		log.Fatalf("Could not connect to Redis: %v", err)
+   if err := rdb.Ping(ctx).Err(); err != nil {
+		log.Fatalf("Could not connect to Redis at %s: %v", redisAddr, err)
 	}
-	fmt.Println("[GateKeeper] Connected to Redis successfully.")
+	fmt.Printf("[GateKeeper] Connected to Redis at %s\n", redisAddr)
 
 	luaScript := redis.NewScript(tokenBucketLuaScript)
 
