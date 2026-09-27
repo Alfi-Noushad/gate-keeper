@@ -10,6 +10,7 @@ import (
     "time"
     "context"
     _ "embed"
+    "strings"
 
     "github.com/redis/go-redis/v9"
 )
@@ -20,15 +21,69 @@ var tokenBucketLuaScript string
 
 var ctx = context.Background()
 
-// NewProxy creates an HTTP handler that forwards incoming traffic to a target URL.
-func NewProxy(target string) (*httputil.ReverseProxy, error) {
+//// Route represents a downstream target service mapped to a path prefix
+type Route struct {
+    Prefix      string
+    TargetURL   *url.URL
+    Proxy       *httputil.ReverseProxy
+    StripPrefix bool
+}
+
+//collection fo routes
+type Router struct {
+    routes []Route
+}
+
+// Registering routes
+func (r *Router) AddRoute(prefix string, target string, stripPrefix bool) error {
+    //parse the target url
     parsedURL, err := url.Parse(target)
     if err != nil {
-        return nil, err
+        return fmt.Errorf("invalid target URL '%s': %w", target, err)
     }
-    // go standard library for reverse proxy
-    return httputil.NewSingleHostReverseProxy(parsedURL), nil
+
+    proxy := httputil.NewSingleHostReverseProxy(parsedURL)
+
+    //stripPrefix logic   GET /api/v1/users/123 ---> /123 is passed to backend
+    if stripPrefix {
+        originalDirector := proxy.Director
+
+        proxy.Director = func(req *http.Request) {
+            originalDirector(req)
+
+            req.URL.Path = strings.TrimPrefix(
+                req.URL.Path,
+                prefix,
+            )
+
+            if !strings.HasPrefix(req.URL.Path, "/") {
+                req.URL.Path = "/" + req.URL.Path
+                }
+        }    
+    }
+
+    r.routes = append(r.routes, Route{
+    Prefix:      prefix,
+    TargetURL:   parsedURL,
+    Proxy:       proxy,
+    StripPrefix: stripPrefix,
+    })
+
+   return nil
 }
+
+// finding the correct route
+func (r *Router) Match(path string) *httputil.ReverseProxy {
+    for _, route := range r.routes {
+        if strings.HasPrefix(path, route.Prefix) {
+            return route.Proxy
+        }
+    }
+
+    return nil
+}
+
+
 
 func main() {
 
@@ -42,19 +97,46 @@ func main() {
 	}
 	fmt.Println("[GateKeeper] Connected to Redis successfully.")
 
-	//luaScript := redis.NewScript(tokenBucketLuaScript)
+	luaScript := redis.NewScript(tokenBucketLuaScript)
 
-    //fmt.Println("Hello GateKeeper")
-    // downstram target
-    targetURL := "https://httpbin.org"
+    // config dynamic routes
+    router := &Router{}
 
-    proxy, err := NewProxy(targetURL)
-	if err != nil {
-		log.Fatalf("Failed to initialize reverse proxy: %v", err)
-	}
+    if err := router.AddRoute(
+        "/api/v1/users",
+        "https://httpbin.org/anything/users",
+        true,
+    ); err != nil {
+        log.Fatalf("Failed to add users route: %v", err)
+    }
+
+    if err := router.AddRoute(
+        "/api/v1/orders",
+        "https://httpbin.org/anything/orders",
+        true,
+    ); err != nil {
+        log.Fatalf("Failed to add orders route: %v", err)
+    }
+
+    if err := router.AddRoute(
+        "/",
+        "https://httpbin.org",
+        false,
+    ); err != nil {
+        log.Fatalf("Failed to add default route: %v", err)
+    }
+
+    
     // Define the http req handler
     http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
     fmt.Printf("[GateKeeper] Intercepted %s request for: %s\n", r.Method, r.URL.Path)
+    
+    proxy := router.Match(r.URL.Path)
+
+    if proxy == nil {
+        http.Error(w, "404 Route Not Found", http.StatusNotFound)
+        return
+    }
 
     // Rate Limiter Check
     apiKey := r.Header.Get("X-API-Key")
@@ -66,7 +148,7 @@ func main() {
 
     now := time.Now().Unix()
 
-    luaScript := redis.NewScript(tokenBucketLuaScript)
+    //luaScript := redis.NewScript(tokenBucketLuaScript)
     //fmt.Println("Lua script loaded, length:", len(tokenBucketLuaScript))
 
     res, err := luaScript.Run(
@@ -104,12 +186,17 @@ func main() {
 
 
         fmt.Printf("[200 ALLOWED]  Client: %s | Remaining: %d\n", apiKey, remainingTokens)
-		// Forward the request to the downstream target
+		
+        // Forward the request to the downstream target
 		proxy.ServeHTTP(w, r)
 	})
 
     port := ":8080"
-	fmt.Printf("GateKeeper running on http://localhost%s forwarding to %s\n", port, targetURL)
+
+	fmt.Printf(
+    "GateKeeper running on http://localhost%s with dynamic routing\n",
+    port,
+    )
 	if err := http.ListenAndServe(port, nil); err != nil {
 		log.Fatalf("Server failed: %v", err)
 	}
