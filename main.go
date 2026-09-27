@@ -6,7 +6,16 @@ import (
     "net/http"
     "net/http/httputil"
     "net/url"
+    "strconv"
+    "time"
+
+    "github.com/redis/go-redis/v9"
 )
+
+// Embed token_bucket.lua directly into the go binary
+var tokenBucketLuaScript string
+
+var ctx = context.Background()
 
 // NewProxy creates an HTTP handler that forwards incoming traffic to a target URL.
 func NewProxy(target string) (*httputil.ReverseProxy, error) {
@@ -19,6 +28,19 @@ func NewProxy(target string) (*httputil.ReverseProxy, error) {
 }
 
 func main() {
+
+    // connect to redis
+    rdb := redis.NewClient(&redis.Options{
+        Addr: "localhost:6379"
+    })
+
+    if err := rdb.Ping(ctx).Err(); err != nil {
+		log.Fatalf("Could not connect to Redis: %v", err)
+	}
+	fmt.Println("[GateKeeper] Connected to Redis successfully.")
+
+	luaScript := redis.NewScript(tokenBucketLuaScript)
+
     //fmt.Println("Hello GateKeeper")
     // downstram target
     targetURL := "https://httpbin.org"
